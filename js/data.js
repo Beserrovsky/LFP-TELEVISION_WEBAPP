@@ -111,6 +111,12 @@ export const fishSpriteOptions = [
   "crab4"
 ];
 
+export const employeeSpeciesMap = {
+  junior:  { family: "betta",   count: 5 },
+  vitoria: { family: "gourami", count: 6 },
+  sergio:  { family: "tetra",   count: 5 }
+};
+
 export const satisfactionMap = {
   "Very low": 1,
   Low: 2,
@@ -342,7 +348,8 @@ export const defaultState = {
       {
         id: "q2",
         label: "Satisfaction with J&J interactions",
-        template: "likert"
+        template: "choice",
+        options: ["Yes", "No"]
       },
       {
         id: "q3",
@@ -415,6 +422,15 @@ export function normaliseState(state) {
     googleQuestionId: q.googleQuestionId || undefined,
     googleQuestionType: q.googleQuestionType || undefined
   }));
+
+  // Migrate: satisfaction question changed from 5-point likert to binary Yes/No choice
+  output.settings.coreQuestions = output.settings.coreQuestions.map((q) => {
+    if (q.template === "likert" && !Array.isArray(q.options) &&
+        /satisfaction|happy/i.test(q.label || "")) {
+      return { ...q, template: "choice", options: ["Yes", "No"] };
+    }
+    return q;
+  });
 
   if (!visualisationDefinitions[output.settings.activeVis]) {
     output.settings.activeVis = "vis1";
@@ -553,26 +569,67 @@ function normaliseFishVariant(fishType, fishColour) {
   return fishSpriteOptions.find((option) => option.startsWith(family)) || rawType;
 }
 
+function normaliseSatisfaction(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const lower = String(value).trim().toLowerCase();
+  if (lower === "yes") return "Yes";
+  if (lower === "no") return "No";
+  const num = Number(value);
+  if (num === 1) return "Yes";
+  if (num === 0) return "No";
+  return undefined;
+}
+
+function pickFishVariantForEmployee(employee, seed) {
+  const key = String(employee ?? "").trim().toLowerCase();
+  const mapping = employeeSpeciesMap[key];
+  const n = Math.abs(Math.round(Number(seed) || 0));
+  if (mapping) return `${mapping.family}${(n % mapping.count) + 1}`;
+  return fishSpriteOptions[n % fishSpriteOptions.length];
+}
+
 export function normaliseSubmissionPacket(packet) {
   if (!packet || typeof packet !== "object") return packet;
 
-  const answers = packet.answers && typeof packet.answers === "object" ? packet.answers : {};
-  const mappedAnswers = { ...answers };
+  // Support both answers-wrapped and flat (top-level) packets from the ESP32 receiver
+  const inner = packet.answers && typeof packet.answers === "object" ? packet.answers : {};
+  const mapped = { ...inner };
 
-  mappedAnswers.q1 = firstPresent(mappedAnswers.q1, answers.innovation);
-  mappedAnswers.q2 = firstPresent(mappedAnswers.q2, answers.satisfaction);
-  mappedAnswers.q3 = firstPresent(mappedAnswers.q3, answers.nps);
-  mappedAnswers.fishVariant = firstPresent(
-    mappedAnswers.fishVariant,
-    normaliseFishVariant(answers.fish_type, answers.fish_colour)
+  // Look up a field in the inner answers object first, then the top-level packet
+  const get = (...keys) => firstPresent(...keys.flatMap((k) => [inner[k], packet[k]]));
+
+  // Core survey answers
+  mapped.q1 = firstPresent(mapped.q1, get("innovation"));
+  mapped.q2 = firstPresent(mapped.q2, normaliseSatisfaction(get("satisfaction")));
+  mapped.q3 = firstPresent(mapped.q3, get("nps"));
+
+  // Fish variant — derive from bestEmployee using numeric fields as an entropy seed
+  const employee = get("bestEmployee", "best_employee", "fish_type");
+  const seed = Number(get("counter") || 0)
+    + Number(get("innovation") || 0) * 7
+    + Number(get("nps") || 0) * 3;
+  mapped.fishVariant = firstPresent(
+    mapped.fishVariant,
+    pickFishVariantForEmployee(employee, seed),
+    normaliseFishVariant(get("fish_type"), get("fish_colour"))
   );
-  mappedAnswers.fishColour = firstPresent(mappedAnswers.fishColour, answers.fish_colour);
-  mappedAnswers.name = firstPresent(mappedAnswers.name, answers.name);
+  mapped.bestEmployee = firstPresent(mapped.bestEmployee, employee);
+  mapped.fishColour = firstPresent(mapped.fishColour, get("fish_colour"));
+
+  // Respondent identity
+  mapped.name = firstPresent(mapped.name, get("name"));
+  mapped.identifier = firstPresent(mapped.identifier, get("identifier"));
+
+  // Construct submission_id from transport fields if the receiver omitted it
+  let outPacket = { ...packet };
+  if (!outPacket.submission_id && outPacket.device_id !== undefined && outPacket.counter !== undefined) {
+    outPacket.submission_id = `${outPacket.session_id || "0"}-${outPacket.device_id}-${outPacket.counter}`;
+  }
 
   return {
-    ...packet,
+    ...outPacket,
     type: String(packet.type || "").toLowerCase() === "submission" ? "SUBMISSION" : packet.type,
-    answers: mappedAnswers
+    answers: mapped
   };
 }
 

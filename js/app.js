@@ -854,7 +854,8 @@ function useRecommendedSetup() {
     {
       id: "q2",
       label: "Satisfaction with J&J interactions",
-      template: "likert",
+      template: "choice",
+      options: ["Yes", "No"],
       required: true
     },
     {
@@ -1691,7 +1692,8 @@ function ensureSetupDefaults() {
       {
         id: "q2",
         label: "Satisfaction with J&J interactions",
-        template: "likert",
+        template: "choice",
+        options: ["Yes", "No"],
         required: true
       },
       {
